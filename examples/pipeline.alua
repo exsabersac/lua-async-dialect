@@ -1,0 +1,23 @@
+-- 异步流水线：fetch 桩返回 Task.resolved，中间用普通 Lua 变换，再 await 链
+-- Task 由 splice 转译器在输出顶部注入；此处直接使用。
+-- 期望 RESULT: 110
+
+local function fetch_user(id)
+  return Task.resolved({ id = id, score = 40 })
+end
+
+local function fetch_bonus(user)
+  return Task.resolved(user.score + 10)
+end
+
+local function transform(n)
+  return n * 2
+end
+
+async function run_pipeline()
+  local user = await fetch_user(1)
+  local bonus = await fetch_bonus(user)
+  local scaled = transform(bonus)   -- (40+10)*2 = 100
+  local tip = await delay(10)
+  return scaled + tip               -- 110
+end

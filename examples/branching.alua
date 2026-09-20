@@ -1,0 +1,23 @@
+-- if/else 分支内均可 await；while 内 await 累加
+-- 期望 RESULT: 35  （path A: 10+5=15, then while 加两次 delay(10) → 35）
+
+async function run_branch(flag)
+  local total = 0
+  if flag == 1 then
+    local a = await delay(10)
+    total = total + a
+    local b = await delay(5)
+    total = total + b
+  else
+    local x = await delay(100)
+    total = total + x
+  end
+
+  local i = 0
+  while i < 2 do
+    local d = await delay(10)
+    total = total + d
+    i = i + 1
+  end
+  return total
+end

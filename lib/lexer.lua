@@ -1,7 +1,6 @@
 --[[
-  词法分析器：把 .alua 源码切成 token 流（带 line/col）。
-  支持关键字、名字、数字、字符串、常用运算符，以及 -- 行注释。
-  不实现完整 Lua 词法；仅覆盖 MVP 方言。
+  词法分析器：把 async 区域源码切成 token 流（带 line/col）。
+  覆盖嵌入式方言 async 函数体内所需语法；不实现完整 Lua 词法。
 ]]
 
 local Lexer = {}
@@ -10,6 +9,11 @@ Lexer.__index = Lexer
 local KEYWORDS = {
   ["async"] = true, ["function"] = true, ["end"] = true,
   ["local"] = true, ["return"] = true, ["await"] = true,
+  ["if"] = true, ["then"] = true, ["else"] = true, ["elseif"] = true,
+  ["while"] = true, ["do"] = true, ["for"] = true,
+  ["and"] = true, ["or"] = true, ["not"] = true,
+  ["true"] = true, ["false"] = true, ["nil"] = true,
+  ["repeat"] = true, ["until"] = true,
 }
 
 function Lexer.new(src)
@@ -18,6 +22,10 @@ end
 
 function Lexer:peek()
   return self.src:sub(self.i, self.i)
+end
+
+function Lexer:peek_at(n)
+  return self.src:sub(self.i + n, self.i + n)
 end
 
 function Lexer:advance()
@@ -38,10 +46,41 @@ function Lexer:skip_ws_and_comments()
     if c == "" then return end
     if c == " " or c == "\t" or c == "\r" or c == "\n" then
       self:advance()
-    elseif c == "-" and self.src:sub(self.i + 1, self.i + 1) == "-" then
-      -- 行注释：吃到换行（换行留给下一轮空白处理以更新 line）
-      while self:peek() ~= "" and self:peek() ~= "\n" do
-        self:advance()
+    elseif c == "-" and self:peek_at(1) == "-" then
+      self:advance()
+      self:advance()
+      -- 长注释 --[=*[ ... ]=*]
+      if self:peek() == "[" then
+        local j = self.i + 1
+        local eq = 0
+        while self.src:sub(j, j) == "=" do
+          eq = eq + 1
+          j = j + 1
+        end
+        if self.src:sub(j, j) == "[" then
+          -- consume opening
+          while self.i < j + 1 do self:advance() end
+          local close = "]" .. string.rep("=", eq) .. "]"
+          while true do
+            if self:peek() == "" then
+              error(string.format("Unterminated long comment at %d:%d", self.line, self.col))
+            end
+            if self.src:sub(self.i, self.i + #close - 1) == close then
+              for _ = 1, #close do self:advance() end
+              break
+            end
+            self:advance()
+          end
+        else
+          -- 行注释
+          while self:peek() ~= "" and self:peek() ~= "\n" do
+            self:advance()
+          end
+        end
+      else
+        while self:peek() ~= "" and self:peek() ~= "\n" do
+          self:advance()
+        end
       end
     else
       return
@@ -53,7 +92,7 @@ function Lexer:read_number()
   local start = self.i
   local line, col = self.line, self.col
   while self:peek():match("%d") do self:advance() end
-  if self:peek() == "." and self.src:sub(self.i + 1, self.i + 1):match("%d") then
+  if self:peek() == "." and self:peek_at(1):match("%d") then
     self:advance()
     while self:peek():match("%d") do self:advance() end
   end
@@ -93,7 +132,6 @@ function Lexer:read_ident()
   while self:peek():match("[%w_]") do self:advance() end
   local text = self.src:sub(start, self.i - 1)
   if KEYWORDS[text] then
-    -- 关键字 token 的 type 即关键字本身，便于 parser 用 match("async") 等
     return { type = text, value = text, line = line, col = col }
   end
   return { type = "name", value = text, line = line, col = col }
@@ -109,18 +147,30 @@ function Lexer:next()
   if c:match("%d") then return self:read_number() end
   if c == '"' or c == "'" then return self:read_string() end
   if c:match("[%a_]") then return self:read_ident() end
-  if c == "(" or c == ")" or c == "," or c == "+" or c == "-" or c == "*" or c == "/" then
+
+  -- multi-char operators
+  local two = c .. self:peek_at(1)
+  if two == "==" or two == "~=" or two == "<=" or two == ">=" or two == ".." then
+    self:advance()
+    self:advance()
+    return { type = two, value = two, line = line, col = col }
+  end
+
+  local singles = {
+    ["("] = true, [")"] = true, ["["] = true, ["]"] = true,
+    ["{"] = true, ["}"] = true, [","] = true, [";"] = true,
+    ["+"] = true, ["-"] = true, ["*"] = true, ["/"] = true,
+    ["="] = true, ["<"] = true, [">"] = true, ["."] = true,
+    [":"] = true, ["#"] = true,
+  }
+  if singles[c] then
     self:advance()
     return { type = c, value = c, line = line, col = col }
   end
-  if c == "=" then
-    self:advance()
-    return { type = "=", value = "=", line = line, col = col }
-  end
+
   error(string.format("Unexpected character %q at %d:%d", c, line, col))
 end
 
---- 一次扫完全部 token（含结尾 eof）
 function Lexer:tokenize()
   local toks = {}
   while true do

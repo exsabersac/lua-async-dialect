@@ -1,16 +1,12 @@
 #!/usr/bin/env lua
 --[[
-  CLI 转译器：.alua → .lua
-  管线：Lexer → Parser → Codegen（状态机，无 coroutine）。
+  CLI 转译器：.alua → .lua（嵌入式方言 / splice）
+  管线：Splice 扫描 → 对 async 区域 Lexer → Parser → Codegen；其余原样拷贝。
   用法：lua transpile.lua <input.alua> [-o out.lua] [--stdout]
 ]]
 
 local function dirname(path)
   return path:match("^(.*)/[^/]+$") or "."
-end
-
-local function basename(path)
-  return path:match("([^/]+)$") or path
 end
 
 local function change_ext(path, newext)
@@ -23,9 +19,7 @@ end
 local script_dir = dirname(arg[0])
 package.path = script_dir .. "/?.lua;" .. script_dir .. "/?/init.lua;" .. package.path
 
-local Lexer = require("lib.lexer")
-local Parser = require("lib.parser")
-local Codegen = require("lib.codegen")
+local Splice = require("lib.splice")
 
 local input, output, to_stdout
 local i = 1
@@ -59,9 +53,7 @@ local src = f:read("*a")
 f:close()
 
 local ok, result = pcall(function()
-  local tokens = Lexer.new(src):tokenize()
-  local ast = Parser.new(tokens):parse_file()
-  return Codegen.generate(ast, {
+  return Splice.transpile(src, {
     task_require = 'require("runtime.task")',
   })
 end)

@@ -2,6 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-lua transpile.lua examples/hello.alua -o examples/hello.lua
-lua transpile.lua examples/chain.alua -o examples/chain.lua
-echo "Built examples/hello.lua and examples/chain.lua"
+for f in examples/*.alua; do
+  out="${f%.alua}.lua"
+  lua transpile.lua "$f" -o "$out"
+done
+echo "Built all examples/*.alua → *.lua"

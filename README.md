@@ -1,44 +1,49 @@
 # lua-async-dialect
 
-极简 Lua **异步方言**：用接近 C# 的 `async function` / `await` 写法，由转译器生成**表驱动状态机**（Task），**不使用** `coroutine`。
+极简 Lua **嵌入式异步方言**：`.alua` 文件以**标准 Lua 为宿主**（像 Makefile 嵌入 recipe），仅对顶层 `async function ... end` 区域做解析与降级；其余文本**原样透传**。转译产物是**表驱动 Task 状态机**，**不使用** `coroutine`。
 
-目标：在标准 Lua 上获得可组合的异步流程，同时把控制流显式落成状态与回调，便于审阅、调试，也避免协程与宿主事件循环纠缠。
+## 嵌入式模型（一句话）
+
+| 区域 | 处理 |
+| --- | --- |
+| 普通 Lua（`local`、表、`function`、`if`/`for`、方法等） | **原样拷贝**到输出 |
+| `async function Name(...) ... end` | lex → parse → codegen 成状态机函数 |
+| 若存在任一 async | 输出顶部插入一次 `local Task = require("runtime.task")` |
 
 ## 目标与非目标
 
-| 做 | 不做（MVP） |
+| 做 | 不做 |
 | --- | --- |
-| C# 风格 `async` / `await` 语法糖 | `if` / `while` / `for` |
-| 转译为 Task 状态机 | 取消（cancellation） |
-| 纯 Lua 运行时（`andThen` / `defer` / `pump`） | 方法调用 `:`、表字面量、可变参数 |
-| 无 `coroutine` | 完整 Lua 语法兼容 |
+| Lua 宿主 + 嵌入 async 块（splice） | 取消（cancellation） |
+| async 体内：比较 / 逻辑 / `..` / `.` `[]` / `:` / 表构造 | 完整 Lua 语法兼容 |
+| `if` / `while` / 数值 `for`，分支与循环内可 `await` | `coroutine` |
+| Task 运行时（`andThen` / `defer` / `pump`） | |
 
-详细设计见 [`docs/设计说明.md`](docs/设计说明.md)；MVP 文法见 [`docs/语法.md`](docs/语法.md)。
+详细设计见 [`docs/设计说明.md`](docs/设计说明.md)；文法见 [`docs/语法.md`](docs/语法.md)。
 
-## MVP 语法速览
+## async 体内语法速览
 
 ```
 async function Name ( [Name (, Name)*] ) block end
 ```
 
-- **语句**：`local Name = exp`、`Name = exp`、裸表达式（通常是调用）、`return [exp]`
-- **表达式**：`await exp`、数字、字符串、名字、调用、`+ - * /`、括号、一元 `-`
-- **关键字**：`async` `function` `end` `local` `return` `await`
-- **注释**：`--` 行注释（与 Lua 相同）
-
-**未实现**：控制流（if/while/for）、取消、方法 `:`、表字面量、可变参数、多返回值等。
+- **语句**：`local` / 赋值 / 表达式语句 / `return` / `if`/`elseif`/`else` / `while` / 数值 `for`
+- **表达式**：`await`、字面量、名字、调用、`obj:method()`、`a.b` / `a[i]`、表 `{...}`、
+  `+ - * /`、`..`、比较、`and`/`or`/`not`、`#`
+- **注释**：`--` 与 `--[[ ]]`（splice 扫描与 lexer 均识别）
 
 ## 仓库布局
 
 ```
-runtime/task.lua     # Task 运行时（pending | fulfilled | rejected）
-lib/lexer.lua        # 词法分析
-lib/parser.lua       # 递归下降解析 → AST
+runtime/task.lua     # Task 运行时
+lib/splice.lua       # 嵌入式扫描 + 拼接转译
+lib/lexer.lua        # async 区域词法
+lib/parser.lua       # async 区域语法 → AST
 lib/codegen.lua      # AST → 状态机 Lua
 transpile.lua        # CLI：.alua → .lua
-examples/*.alua      # 方言源文件
-examples/*.lua       # 转译产物（可提交以便直接跑 demo）
-run_demo.lua         # 加载示例并 pump 微任务队列
+examples/*.alua      # 方言源文件（可混写普通 Lua）
+examples/*.lua       # 转译产物
+run_demo.lua         # 运行示例
 scripts/build_examples.sh
 docs/设计说明.md
 docs/语法.md
@@ -46,41 +51,41 @@ docs/语法.md
 
 ## 如何转译
 
-在项目根目录：
-
 ```bash
-lua transpile.lua examples/hello.alua -o examples/hello.lua
-lua transpile.lua examples/chain.alua -o examples/chain.lua
-# 或一次性：
 bash scripts/build_examples.sh
+# 或单个：
+lua transpile.lua examples/mixed_lua.alua -o examples/mixed_lua.lua
 ```
-
-也可用 `--stdout` 把生成代码打到标准输出。
-
-生成文件会 `require("runtime.task")`。请从**项目根**运行，并保证 `package.path` 含项目根（`run_demo.lua` / `transpile.lua` 已处理相对路径）。
 
 ## 如何运行 Demo
 
 ```bash
 bash scripts/build_examples.sh
-lua run_demo.lua hello   # 期望 RESULT: 30   (10+20)
-lua run_demo.lua chain   # 期望 RESULT: 20   (10+5, then 15+5)
+lua run_demo.lua hello      # RESULT: 30
+lua run_demo.lua chain      # RESULT: 20
+lua run_demo.lua mixed      # RESULT: 42
+lua run_demo.lua pipeline   # RESULT: 110
+lua run_demo.lua branching  # RESULT: 35
+lua run_demo.lua all        # 全部跑一遍
 ```
 
-`delay(ms)` 在 demo 里用 `Task.defer` 模拟：不睡真实时间，微任务里把 Task resolve 为数值 `ms`，便于算术演示。
+`delay(ms)` 在 demo 里用 `Task.defer` 模拟：不睡真实时间，resolve 为数值 `ms`。
+
+## 示例说明
+
+| 文件 | 内容 |
+| --- | --- |
+| `hello.alua` / `chain.alua` | 纯 async（透传区仅有注释） |
+| `mixed_lua.alua` | 宿主表与辅助函数 + async 内 await 与拼接 |
+| `pipeline.alua` | fetch 桩（`Task.resolved`）+ 变换 + await 链 |
+| `branching.alua` | `if`/`else` 与 `while` 内 await |
 
 ## 运行时要点
 
 - **状态**：`pending` → `fulfilled` / `rejected`
-- **API**：`Task:andThen(ok, err)`、`:resolve` / `:reject`、`Task.resolved` / `Task.rejected`
-- **与状态机衔接**：`Task.await_then(task, sm)` —— Task 结算后调用 `sm:step(ok, val)`
-- **微任务**：`Task.defer` 入队，`Task.pump` 排空（demo / 测试用）
-
-## 当前状态
-
-- MVP 转译与 Task 运行时可用；示例 `hello` / `chain` 可通过。
-- **尚无取消**：没有 `cancel_scope`、ambient cancellation token，也没有在 await 点检查取消。规划见设计说明「未来」一节，**本仓库当前不实现**。
+- **衔接**：`Task.await_then(task, sm)` → `sm:step(ok, val)`
+- **微任务**：`Task.defer` / `Task.pump`
 
 ## 设计一句话
 
-每个 `async function` 变成返回 Task 的普通函数；每个 `await` 推进 `_state` 并 `return Task.await_then(...)`；拒绝路径走 `sm:step(false, err)` → `Task.rejected(err)`。全程无协程。
+`.alua` = Lua 宿主文件；每个 `async function` 变成返回 Task 的普通函数；每个 `await` 推进 `_state` 并 `return Task.await_then(...)`；`if`/`while` 通过状态跳转保留结构。全程无协程。

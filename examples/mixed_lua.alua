@@ -1,0 +1,26 @@
+-- 嵌入式方言：普通 Lua 宿主 + 一个 async 函数
+-- 期望 RESULT: 42  （helpers 与表字段参与计算）
+
+local Config = {
+  base = 10,
+  label = "mixed",
+}
+
+local function double(x)
+  return x * 2
+end
+
+local function add_base(x)
+  return x + Config.base
+end
+
+async function run_mixed()
+  local a = await delay(7)
+  local b = double(a)           -- 14
+  local c = await delay(5)      -- 5
+  local sum = add_base(b + c)   -- 14+5+10 = 29
+  local msg = Config.label .. ":" .. sum
+  -- 再用一次 await，并做比较分支无关的算术
+  local extra = await delay(13)
+  return sum + extra            -- 29+13 = 42
+end
