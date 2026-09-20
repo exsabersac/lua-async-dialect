@@ -1,0 +1,31 @@
+-- Task.forget：火忘式吞掉拒绝，避免未处理 rejection
+-- 同时验证 from_exception / from_canceled 别名
+-- 期望 RESULT: ok
+
+local saw_unhandled = false
+
+local function setup()
+  saw_unhandled = false
+  Task.set_unhandled_rejection(function(_reason, _task)
+    saw_unhandled = true
+  end)
+end
+
+async function run_forget()
+  setup()
+
+  -- 未观察的 rejected 会在下一轮 pump 触发 hook；forget 应抑制
+  local bad = Task.from_exception("should-not-surface")
+  bad:forget()
+
+  local canceled = Task.from_canceled()
+  Task.forget(canceled)
+
+  -- 给 unhandled 检查一次泵机会（若 forget 失效则会置 saw_unhandled）
+  local _ = await Task.delay(1)
+
+  if saw_unhandled then
+    return "leaked"
+  end
+  return "ok"
+end

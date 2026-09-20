@@ -1,0 +1,8 @@
+-- Task.delay + 虚拟时钟：不睡真实时间，由 run_demo 的 Task.advance 推进
+-- 期望 RESULT: 30  （10+20）
+
+async function run_delay_timer()
+  local a = await Task.delay(10)
+  local b = await Task.delay(20)
+  return a + b
+end

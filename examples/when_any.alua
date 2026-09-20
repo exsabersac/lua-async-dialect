@@ -1,0 +1,14 @@
+-- Task.when_any：先完成的 delay 获胜
+-- delay(5) 应先于 delay(50)；期望 RESULT: 5
+
+async function run_when_any()
+  local winner = await Task.when_any({
+    delay(50),
+    delay(5),
+  })
+  -- winner: { index, value, status, task }
+  if winner.status ~= "fulfilled" then
+    return -1
+  end
+  return winner.value
+end

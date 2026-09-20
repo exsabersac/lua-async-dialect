@@ -103,19 +103,22 @@ function CTS:cancel(reason)
   self._token:_fire()
 end
 
---- 在 ms 后 cancel；若宿主通过 Task.set_timer 提供定时器则用之，
---- 否则退化为 Task.defer（下一轮 pump 即取消，忽略 ms）。
+--- 在 ms 后 cancel。与 Task.delay 共用调度（宿主 timer 或内部堆）。
 function CTS:cancel_after(ms)
   if self._canceled then return end
-  local timer = Task.get_timer and Task.get_timer() or nil
-  if timer then
-    self._timer_cancel = timer(ms, function()
-      self:cancel()
-    end)
-  else
-    Task.defer(function()
-      self:cancel()
-    end)
+  local done = false
+  local delay_task = Task.delay(ms, Cancellation.none)
+  delay_task:andThen(function()
+    if done then return end
+    done = true
+    self:cancel()
+  end, function()
+    done = true
+  end, function()
+    done = true
+  end)
+  self._timer_cancel = function()
+    done = true
   end
 end
 
