@@ -1,4 +1,8 @@
--- Minimal lexer for the async/await dialect.
+--[[
+  词法分析器：把 .alua 源码切成 token 流（带 line/col）。
+  支持关键字、名字、数字、字符串、常用运算符，以及 -- 行注释。
+  不实现完整 Lua 词法；仅覆盖 MVP 方言。
+]]
 
 local Lexer = {}
 Lexer.__index = Lexer
@@ -35,6 +39,7 @@ function Lexer:skip_ws_and_comments()
     if c == " " or c == "\t" or c == "\r" or c == "\n" then
       self:advance()
     elseif c == "-" and self.src:sub(self.i + 1, self.i + 1) == "-" then
+      -- 行注释：吃到换行（换行留给下一轮空白处理以更新 line）
       while self:peek() ~= "" and self:peek() ~= "\n" do
         self:advance()
       end
@@ -88,6 +93,7 @@ function Lexer:read_ident()
   while self:peek():match("[%w_]") do self:advance() end
   local text = self.src:sub(start, self.i - 1)
   if KEYWORDS[text] then
+    -- 关键字 token 的 type 即关键字本身，便于 parser 用 match("async") 等
     return { type = text, value = text, line = line, col = col }
   end
   return { type = "name", value = text, line = line, col = col }
@@ -114,6 +120,7 @@ function Lexer:next()
   error(string.format("Unexpected character %q at %d:%d", c, line, col))
 end
 
+--- 一次扫完全部 token（含结尾 eof）
 function Lexer:tokenize()
   local toks = {}
   while true do

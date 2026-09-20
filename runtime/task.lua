@@ -1,15 +1,25 @@
--- Task: promise-like runtime without coroutines.
--- Status: pending | fulfilled | rejected
+--[[
+  Task 运行时：类 Promise 的异步原语，不使用 coroutine。
+
+  状态：pending → fulfilled | rejected（终态）。
+  公开 API：new / resolved / rejected / resolve / reject / andThen /
+            await_then / defer / pump。
+  设计意图：转译出的状态机通过 await_then 挂起与恢复；宿主用 defer+pump
+  驱动微任务，避免在 resolve 回调里同步重入过深。
+]]
 
 local Task = {}
 Task.__index = Task
 
+-- 微任务队列（FIFO）；pump 时按序执行
 local queue = {}
 
+--- 将 fn 排入微任务队列（不立即执行）
 function Task.defer(fn)
   queue[#queue + 1] = fn
 end
 
+--- 排空微任务队列；demo / 测试里循环调用直到业务 Task 结算
 function Task.pump()
   while #queue > 0 do
     local fn = table.remove(queue, 1)
@@ -40,6 +50,7 @@ function Task.rejected(e)
   return t
 end
 
+--- 结算为成功；已结算则忽略。回调经 defer 异步触发。
 function Task:resolve(v)
   if self._status ~= "pending" then return self end
   self._status = "fulfilled"
@@ -54,6 +65,7 @@ function Task:resolve(v)
   return self
 end
 
+--- 结算为失败；已结算则忽略。
 function Task:reject(e)
   if self._status ~= "pending" then return self end
   self._status = "rejected"
@@ -68,7 +80,8 @@ function Task:reject(e)
   return self
 end
 
--- ok(value) / err(reason); either may be nil
+--- 链式续延。ok(value) / err(reason) 均可为 nil。
+--- 回调若返回 Task（同元表），则扁平接到输出 Task；抛错则 reject。
 function Task:andThen(ok, err)
   local out = Task.new()
   local function on_ok(v)
@@ -112,7 +125,8 @@ function Task:andThen(ok, err)
   return out
 end
 
--- When task settles, call sm:step(ok, value_or_err) and return its result (for chaining).
+--- 状态机挂起点：task 结算后调用 sm:step(ok, value_or_err)，并返回其结果以便继续链式。
+--- 这是 await 降级的唯一运行时入口（无 coroutine.yield）。
 function Task.await_then(task, sm)
   return task:andThen(
     function(v) return sm:step(true, v) end,

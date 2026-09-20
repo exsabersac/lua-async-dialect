@@ -1,4 +1,4 @@
--- hello.alua: await delay twice, return a number
+-- 演示：连续两次 await delay，再把结果相加返回（期望 10+20=30）
 async function hello()
   local a = await delay(10)
   local b = await delay(20)

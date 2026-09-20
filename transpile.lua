@@ -1,5 +1,9 @@
 #!/usr/bin/env lua
--- CLI: lua transpile.lua <input.alua> [-o out.lua] [--stdout]
+--[[
+  CLI 转译器：.alua → .lua
+  管线：Lexer → Parser → Codegen（状态机，无 coroutine）。
+  用法：lua transpile.lua <input.alua> [-o out.lua] [--stdout]
+]]
 
 local function dirname(path)
   return path:match("^(.*)/[^/]+$") or "."

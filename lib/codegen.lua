@@ -1,4 +1,12 @@
--- Codegen: async functions → Task-returning state machines (no coroutines).
+--[[
+  代码生成：async function → 返回 Task 的表状态机（无 coroutine）。
+
+  核心降级：
+  1. 语句中的 await 按求值顺序拆出，换成临时名 _awN；
+  2. 在每个 await 边界切开状态；
+  3. 状态内同步执行代码，遇 await 则推进 _state 并 return Task.await_then(...);
+  4. 局部量放在 sm._locals，跨 await 存活。
+]]
 
 local Codegen = {}
 
@@ -6,6 +14,7 @@ local function quote_string(s)
   return string.format("%q", s)
 end
 
+--- 生成不含 await 的表达式 Lua；await 必须已在语句层降级
 local function emit_expr(e, ctx)
   if e.tag == "number" then
     return tostring(e.value)
@@ -15,7 +24,7 @@ local function emit_expr(e, ctx)
     if ctx.params[e.name] or ctx.locals[e.name] then
       return "self._locals." .. e.name
     end
-    -- free name: global / upvalue (e.g. delay, other async fn)
+    -- 自由名：全局 / 上值（如 delay、其他 async 函数）
     return e.name
   elseif e.tag == "binop" then
     return "(" .. emit_expr(e.left, ctx) .. " " .. e.op .. " " .. emit_expr(e.right, ctx) .. ")"
@@ -34,8 +43,7 @@ local function emit_expr(e, ctx)
   end
 end
 
--- Split statements into state-machine steps at each await.
--- Each step is a list of "actions" until the next await or return.
+-- 收集表达式中的 await 节点（调试/分析用；实际降级走 lower_awaits）
 local function collect_awaits(expr, list)
   if not expr then return end
   if expr.tag == "await" then
@@ -54,8 +62,8 @@ local function collect_awaits(expr, list)
   end
 end
 
--- Rewrite expression replacing await nodes with temporary placeholders.
--- Returns rewritten expr and list of {tmp, awaited_expr} in evaluation order.
+--- 把表达式里的 await 换成 name 临时量；返回改写后的表达式与
+--- 按求值顺序的 { tmp, expr } 列表（expr 为 await 的内层，已递归降级）。
 local function lower_awaits(expr, tmp_id)
   local awaits = {}
   local function walk(e)
@@ -90,14 +98,10 @@ local function emit_async_fn(fn, lines)
     ctx.locals[p] = true
   end
 
-  -- Build linear steps: each await becomes its own state transition.
-  -- Sequence of states: each state does some non-await work then either
-  -- awaits (return Task.await_then) or returns Task.resolved / falls through.
-
+  -- 将函数体展平为微操作序列，再在 await / return 处切成状态
   local tmp_id = { 0 }
-  -- Flatten body into a list of micro-ops with awaits expanded.
-  -- Each item: { kind="code", lines={...} } or { kind="await", tmp=..., expr=... }
-  -- or { kind="return", expr=... }
+  -- ops: { kind="code", line=... } | { kind="await", tmp=..., expr=... }
+  --    | { kind="return", expr=... }
 
   local ops = {}
   local function add_code(lua_line)
@@ -144,8 +148,7 @@ local function emit_async_fn(fn, lines)
     end
   end
 
-  -- Partition ops into states at each await boundary.
-  -- State N: run codes until await or return.
+  -- 在每个 await 边界 flush 当前状态
   local states = {}
   local cur = { codes = {}, await = nil, ret = nil }
   local function flush_state()
@@ -167,7 +170,7 @@ local function emit_async_fn(fn, lines)
   if #cur.codes > 0 or cur.await or cur.ret then
     flush_state()
   end
-  -- If empty body, resolve nil
+  -- 空函数体 → resolve nil；末状态若无 return/await 则补 return nil
   if #states == 0 then
     states[1] = { codes = {}, await = nil, ret = { kind = "return", expr = nil } }
   elseif not states[#states].ret and not states[#states].await then
@@ -188,9 +191,8 @@ local function emit_async_fn(fn, lines)
     local idx = si - 1
     local prefix = (si == 1) and "    if" or "    elseif"
     lines[#lines + 1] = prefix .. " s == " .. idx .. " then"
-    -- If this state was entered via await, bind val to tmp
-    -- For state 0, val is unused (initial step(true)).
-    -- For state k>0, previous state's await stored result in val.
+    -- 状态 0：初始 step(true)，val 无用。
+    -- 状态 k>0：val 是上一状态 await 的结果，写入对应 _aw 临时量。
     if si > 1 then
       local prev = states[si - 1]
       if prev.await then
@@ -221,6 +223,7 @@ local function emit_async_fn(fn, lines)
   lines[#lines + 1] = ""
 end
 
+--- 生成完整 Lua 源：require Task + 各 async 函数的状态机
 function Codegen.generate(ast, opts)
   opts = opts or {}
   local task_require = opts.task_require or 'require("runtime.task")'

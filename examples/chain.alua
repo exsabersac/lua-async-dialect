@@ -1,4 +1,4 @@
--- chain.alua: one async function awaits another
+-- 演示：async 函数互相 await（add_one 链式调用，期望 (10+5)+5=20）
 async function add_one(x)
   local y = await delay(5)
   return x + y

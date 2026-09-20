@@ -1,4 +1,8 @@
--- Recursive-descent parser for the async/await dialect.
+--[[
+  递归下降语法分析：token 流 → AST。
+  文件级只接受 async function；await 为一元运算符。
+  AST 节点用 tag 字段区分（async_fn / local / await / binop 等）。
+]]
 
 local Parser = {}
 Parser.__index = Parser
@@ -32,7 +36,7 @@ function Parser:expect(typ)
   return self:advance()
 end
 
--- expression: additive
+-- expression → 加减层（最低优先级）
 function Parser:parse_expr()
   return self:parse_add()
 end
@@ -58,6 +62,7 @@ function Parser:parse_mul()
 end
 
 function Parser:parse_unary()
+  -- await 右结合：await await x
   if self:match("await") then
     local e = self:parse_unary()
     return { tag = "await", expr = e }
@@ -83,7 +88,7 @@ function Parser:parse_primary()
   if t.type == "name" then
     self:advance()
     local node = { tag = "name", name = t.value }
-    -- call: name ( args )
+    -- 支持 f()() 链式调用
     while self:cur().type == "(" do
       self:advance()
       local args = {}
@@ -101,7 +106,7 @@ function Parser:parse_primary()
   if self:match("(") then
     local e = self:parse_expr()
     self:expect(")")
-    -- allow (expr)(args)
+    -- 允许 (expr)(args)
     local node = e
     while self:cur().type == "(" do
       self:advance()
@@ -132,14 +137,14 @@ function Parser:parse_stmt()
     local ct = self:cur().type
     if ct ~= "end" and ct ~= "eof" and ct ~= "local" and ct ~= "return"
        and ct ~= "async" and ct ~= "function" then
-      -- heuristic: if next looks like start of expression
+      -- 启发式：下一 token 像表达式开头则解析 return 值
       if ct == "name" or ct == "number" or ct == "string" or ct == "(" or ct == "await" or ct == "-" then
         exp = self:parse_expr()
       end
     end
     return { tag = "return", expr = exp }
   end
-  -- assignment or bare call
+  -- 赋值或裸表达式语句
   if self:cur().type == "name" then
     local save = self.i
     local name = self:advance().value
@@ -147,7 +152,7 @@ function Parser:parse_stmt()
       local exp = self:parse_expr()
       return { tag = "assign", name = name, expr = exp }
     end
-    -- rewind and parse as expression statement (call)
+    -- 回退：按表达式语句解析（通常是调用）
     self.i = save
     local exp = self:parse_expr()
     return { tag = "expr_stmt", expr = exp }
@@ -188,6 +193,7 @@ function Parser:parse_async_function()
   return { tag = "async_fn", name = name, params = params, body = body }
 end
 
+--- 解析整文件：零或多个 async function
 function Parser:parse_file()
   local fns = {}
   while self:cur().type ~= "eof" do
