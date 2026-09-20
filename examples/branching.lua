@@ -4,13 +4,27 @@ local Task = require("runtime.task")
 -- 期望 RESULT: 35  （path A: 10+5=15, then while 加两次 delay(10) → 35）
 
 function run_branch(flag)
-  local sm = { _state = 0, _locals = {}, _await_tmp = nil }
+  local sm = { _state = 0, _locals = {}, _await_tmp = nil, _fail_to = nil, _fail_mode = nil, _err = nil, _err_kind = nil, _propagate = false, _has_return = false, _return_val = nil }
   sm._locals.flag = flag
   function sm:step(ok, val)
-    if not ok then return Task.rejected(val) end
-    if self._await_tmp then
-      self._locals[self._await_tmp] = val
-      self._await_tmp = nil
+    if ok ~= true then
+      if self._fail_to ~= nil then
+        self._err = val
+        self._err_kind = (ok == "canceled") and "canceled" or "rejected"
+        if self._fail_mode == "propagate" then self._propagate = true end
+        self._state = self._fail_to
+        self._fail_to = nil
+        self._fail_mode = nil
+        self._await_tmp = nil
+      else
+        if ok == "canceled" then return Task.canceled(val) end
+        return Task.rejected(val)
+      end
+    else
+      if self._await_tmp then
+        self._locals[self._await_tmp] = val
+        self._await_tmp = nil
+      end
     end
     while true do
       local s = self._state
@@ -24,12 +38,16 @@ function run_branch(flag)
       elseif s == 1 then
         self._state = 2
         self._await_tmp = "_aw0"
+        self._fail_to = nil
+        self._fail_mode = nil
         return Task.await_then(delay(10), self)
       elseif s == 2 then
         self._locals.a = self._locals._aw0
         self._locals.total = (self._locals.total + self._locals.a)
         self._state = 3
         self._await_tmp = "_aw1"
+        self._fail_to = nil
+        self._fail_mode = nil
         return Task.await_then(delay(5), self)
       elseif s == 3 then
         self._locals.b = self._locals._aw1
@@ -38,6 +56,8 @@ function run_branch(flag)
       elseif s == 4 then
         self._state = 5
         self._await_tmp = "_aw2"
+        self._fail_to = nil
+        self._fail_mode = nil
         return Task.await_then(delay(100), self)
       elseif s == 5 then
         self._locals.x = self._locals._aw2
@@ -55,6 +75,8 @@ function run_branch(flag)
       elseif s == 8 then
         self._state = 9
         self._await_tmp = "_aw3"
+        self._fail_to = nil
+        self._fail_mode = nil
         return Task.await_then(delay(10), self)
       elseif s == 9 then
         self._locals.d = self._locals._aw3

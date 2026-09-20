@@ -1,9 +1,11 @@
 --[[
   代码生成：async function → 返回 Task 的表状态机（无 coroutine）。
 
-  控制流（if / while / for）与 await 共存：先降到带 label / branch / goto 的
-  线性 ops，再切成状态；sm:step 内用 while 循环处理同步跳转，遇 await 则
-  return Task.await_then。
+  控制流（if / while / for / try-catch-finally）与 await 共存：
+  先降到带 label / branch / goto 的线性 ops，再切成状态；
+  sm:step 内用 while 循环处理同步跳转，遇 await 则 return Task.await_then。
+  await 失败/取消：若在 try 区域则跳到 catch/finally，否则外层 Task
+  rejected 或 canceled。
 ]]
 
 local Codegen = {}
@@ -130,18 +132,70 @@ local function emit_async_fn(fn, lines)
     return (prefix or "L") .. id
   end
 
+  -- try 处理器栈：{ catch_l, finally_l, join_l, in_finally }
+  local handler_stack = {}
+  local function current_handler()
+    return handler_stack[#handler_stack]
+  end
+
   local ops = {}
   local function add_code(lua_line)
     ops[#ops + 1] = { kind = "code", line = lua_line }
+  end
+
+  local function fail_info_for_await()
+    local h = current_handler()
+    if not h then return nil end
+    if h.catch_l then
+      return { target = h.catch_l, mode = "catch" }
+    elseif h.finally_l then
+      return { target = h.finally_l, mode = "propagate" }
+    end
+    return nil
+  end
+
+  local function emit_await_op(tmp, expr)
+    ops[#ops + 1] = {
+      kind = "await",
+      tmp = tmp,
+      expr = expr,
+      fail = fail_info_for_await(),
+    }
   end
 
   local function emit_awaits_then(expr, after_fn)
     local rewritten, awaits = lower_awaits(expr, tmp_id)
     for _, a in ipairs(awaits) do
       ctx.locals[a.tmp] = true
-      ops[#ops + 1] = { kind = "await", tmp = a.tmp, expr = a.expr }
+      emit_await_op(a.tmp, a.expr)
     end
     after_fn(rewritten)
+  end
+
+  --- return：若有 finally，则挂起返回值并 goto finally
+  local function emit_return(expr_node)
+    local h = current_handler()
+    -- 找最外层仍需执行的 finally（从内到外）
+    local finally_target = nil
+    for i = #handler_stack, 1, -1 do
+      local hh = handler_stack[i]
+      if hh.finally_l and not hh.in_finally then
+        finally_target = hh.finally_l
+        break
+      end
+    end
+    if finally_target then
+      if expr_node then
+        add_code("self._return_val = " .. emit_expr(expr_node, ctx))
+      else
+        add_code("self._return_val = nil")
+      end
+      add_code("self._has_return = true")
+      add_code("self._propagate = false")
+      ops[#ops + 1] = { kind = "goto", target = finally_target }
+    else
+      ops[#ops + 1] = { kind = "return", expr = expr_node }
+    end
   end
 
   local lower_stmts
@@ -161,12 +215,12 @@ local function emit_async_fn(fn, lines)
       local rewritten_e, awaits_e = lower_awaits(stmt.expr, tmp_id)
       for _, a in ipairs(awaits_e) do
         ctx.locals[a.tmp] = true
-        ops[#ops + 1] = { kind = "await", tmp = a.tmp, expr = a.expr }
+        emit_await_op(a.tmp, a.expr)
       end
       local tgt, awaits_t = lower_awaits(stmt.target, tmp_id)
       for _, a in ipairs(awaits_t) do
         ctx.locals[a.tmp] = true
-        ops[#ops + 1] = { kind = "await", tmp = a.tmp, expr = a.expr }
+        emit_await_op(a.tmp, a.expr)
       end
       add_code(emit_expr(tgt, ctx) .. " = " .. emit_expr(rewritten_e, ctx))
     elseif stmt.tag == "expr_stmt" then
@@ -176,10 +230,34 @@ local function emit_async_fn(fn, lines)
     elseif stmt.tag == "return" then
       if stmt.expr then
         emit_awaits_then(stmt.expr, function(rewritten)
-          ops[#ops + 1] = { kind = "return", expr = rewritten }
+          emit_return(rewritten)
         end)
       else
-        ops[#ops + 1] = { kind = "return", expr = nil }
+        emit_return(nil)
+      end
+    elseif stmt.tag == "rethrow" then
+      local h = current_handler()
+      local finally_target = nil
+      for i = #handler_stack, 1, -1 do
+        local hh = handler_stack[i]
+        if hh.finally_l and not hh.in_finally then
+          finally_target = hh.finally_l
+          break
+        end
+      end
+      if stmt.expr then
+        emit_awaits_then(stmt.expr, function(rewritten)
+          add_code("self._err = " .. emit_expr(rewritten, ctx))
+          add_code("if type(self._err) == \"table\" and self._err.canceled then self._err_kind = \"canceled\" else self._err_kind = \"rejected\" end")
+        end)
+      end
+      -- else keep existing self._err from catch
+      add_code("self._propagate = true")
+      add_code("self._has_return = false")
+      if finally_target then
+        ops[#ops + 1] = { kind = "goto", target = finally_target }
+      else
+        ops[#ops + 1] = { kind = "propagate_err" }
       end
     elseif stmt.tag == "if" then
       local join_l = fresh_label("endif")
@@ -264,6 +342,66 @@ local function emit_async_fn(fn, lines)
       add_code("self._locals." .. stmt.name .. " = self._locals." .. stmt.name .. " + self._locals." .. step_name)
       ops[#ops + 1] = { kind = "goto", target = head }
       ops[#ops + 1] = { kind = "label", name = exit_l }
+    elseif stmt.tag == "try" then
+      local catch_l = stmt.catch_body and fresh_label("catch") or nil
+      local finally_l = stmt.finally_body and fresh_label("fin") or nil
+      local join_l = fresh_label("tryend")
+
+      handler_stack[#handler_stack + 1] = {
+        catch_l = catch_l,
+        finally_l = finally_l,
+        join_l = join_l,
+        in_finally = false,
+      }
+      lower_stmts(stmt.body)
+      handler_stack[#handler_stack] = nil
+
+      -- 正常离开 try body
+      if finally_l then
+        add_code("self._propagate = false")
+        ops[#ops + 1] = { kind = "goto", target = finally_l }
+      else
+        add_code("self._err = nil")
+        ops[#ops + 1] = { kind = "goto", target = join_l }
+      end
+
+      if stmt.catch_body then
+        ops[#ops + 1] = { kind = "label", name = catch_l }
+        if stmt.catch_name then
+          ctx.locals[stmt.catch_name] = true
+          add_code("self._locals." .. stmt.catch_name .. " = self._err")
+        end
+        handler_stack[#handler_stack + 1] = {
+          catch_l = nil,
+          finally_l = finally_l,
+          join_l = join_l,
+          in_finally = false,
+        }
+        lower_stmts(stmt.catch_body)
+        handler_stack[#handler_stack] = nil
+        if finally_l then
+          add_code("self._propagate = false")
+          ops[#ops + 1] = { kind = "goto", target = finally_l }
+        else
+          add_code("self._err = nil")
+          ops[#ops + 1] = { kind = "goto", target = join_l }
+        end
+      end
+
+      if stmt.finally_body then
+        ops[#ops + 1] = { kind = "label", name = finally_l }
+        handler_stack[#handler_stack + 1] = {
+          catch_l = nil,
+          finally_l = nil,
+          join_l = join_l,
+          in_finally = true,
+        }
+        lower_stmts(stmt.finally_body)
+        handler_stack[#handler_stack] = nil
+        ops[#ops + 1] = { kind = "finally_exit", join = join_l }
+      end
+
+      ops[#ops + 1] = { kind = "label", name = join_l }
     else
       error("unknown stmt: " .. tostring(stmt.tag))
     end
@@ -297,7 +435,8 @@ local function emit_async_fn(fn, lines)
       label_to_block[op.name] = #blocks
     elseif op.kind == "code" then
       cur.codes[#cur.codes + 1] = op.line
-    elseif op.kind == "await" or op.kind == "return" or op.kind == "goto" or op.kind == "branch" then
+    elseif op.kind == "await" or op.kind == "return" or op.kind == "goto"
+        or op.kind == "branch" or op.kind == "finally_exit" or op.kind == "propagate_err" then
       cur.edge = op
       flush_block()
     end
@@ -327,6 +466,10 @@ local function emit_async_fn(fn, lines)
       elseif e.kind == "branch" then
         resolve_label(e.then_t)
         resolve_label(e.else_t)
+      elseif e.kind == "finally_exit" then
+        resolve_label(e.join)
+      elseif e.kind == "await" and e.fail then
+        resolve_label(e.fail.target)
       end
     end
   end
@@ -342,15 +485,29 @@ local function emit_async_fn(fn, lines)
 
   local param_list = table.concat(fn.params, ", ")
   lines[#lines + 1] = "function " .. fn.name .. "(" .. param_list .. ")"
-  lines[#lines + 1] = "  local sm = { _state = 0, _locals = {}, _await_tmp = nil }"
+  lines[#lines + 1] = "  local sm = { _state = 0, _locals = {}, _await_tmp = nil, _fail_to = nil, _fail_mode = nil, _err = nil, _err_kind = nil, _propagate = false, _has_return = false, _return_val = nil }"
   for _, p in ipairs(fn.params) do
     lines[#lines + 1] = "  sm._locals." .. p .. " = " .. p
   end
   lines[#lines + 1] = "  function sm:step(ok, val)"
-  lines[#lines + 1] = "    if not ok then return Task.rejected(val) end"
-  lines[#lines + 1] = "    if self._await_tmp then"
-  lines[#lines + 1] = "      self._locals[self._await_tmp] = val"
-  lines[#lines + 1] = "      self._await_tmp = nil"
+  lines[#lines + 1] = "    if ok ~= true then"
+  lines[#lines + 1] = "      if self._fail_to ~= nil then"
+  lines[#lines + 1] = "        self._err = val"
+  lines[#lines + 1] = "        self._err_kind = (ok == \"canceled\") and \"canceled\" or \"rejected\""
+  lines[#lines + 1] = "        if self._fail_mode == \"propagate\" then self._propagate = true end"
+  lines[#lines + 1] = "        self._state = self._fail_to"
+  lines[#lines + 1] = "        self._fail_to = nil"
+  lines[#lines + 1] = "        self._fail_mode = nil"
+  lines[#lines + 1] = "        self._await_tmp = nil"
+  lines[#lines + 1] = "      else"
+  lines[#lines + 1] = "        if ok == \"canceled\" then return Task.canceled(val) end"
+  lines[#lines + 1] = "        return Task.rejected(val)"
+  lines[#lines + 1] = "      end"
+  lines[#lines + 1] = "    else"
+  lines[#lines + 1] = "      if self._await_tmp then"
+  lines[#lines + 1] = "        self._locals[self._await_tmp] = val"
+  lines[#lines + 1] = "        self._await_tmp = nil"
+  lines[#lines + 1] = "      end"
   lines[#lines + 1] = "    end"
   lines[#lines + 1] = "    while true do"
   lines[#lines + 1] = "      local s = self._state"
@@ -366,6 +523,14 @@ local function emit_async_fn(fn, lines)
     if e and e.kind == "await" then
       lines[#lines + 1] = "        self._state = " .. e.resume
       lines[#lines + 1] = "        self._await_tmp = " .. quote_string(e.tmp)
+      if e.fail then
+        local fail_idx = resolve_label(e.fail.target)
+        lines[#lines + 1] = "        self._fail_to = " .. fail_idx
+        lines[#lines + 1] = "        self._fail_mode = " .. quote_string(e.fail.mode)
+      else
+        lines[#lines + 1] = "        self._fail_to = nil"
+        lines[#lines + 1] = "        self._fail_mode = nil"
+      end
       lines[#lines + 1] = "        return Task.await_then(" .. emit_expr(e.expr, ctx) .. ", self)"
     elseif e and e.kind == "return" then
       if e.expr then
@@ -384,6 +549,32 @@ local function emit_async_fn(fn, lines)
       lines[#lines + 1] = "        else"
       lines[#lines + 1] = "          self._state = " .. t2
       lines[#lines + 1] = "        end"
+    elseif e and e.kind == "finally_exit" then
+      local join_i = resolve_label(e.join)
+      lines[#lines + 1] = "        if self._has_return then"
+      lines[#lines + 1] = "          local rv = self._return_val"
+      lines[#lines + 1] = "          self._has_return = false"
+      lines[#lines + 1] = "          self._return_val = nil"
+      lines[#lines + 1] = "          self._err = nil"
+      lines[#lines + 1] = "          return Task.resolved(rv)"
+      lines[#lines + 1] = "        elseif self._propagate then"
+      lines[#lines + 1] = "          local ek = self._err_kind"
+      lines[#lines + 1] = "          local ev = self._err"
+      lines[#lines + 1] = "          self._propagate = false"
+      lines[#lines + 1] = "          self._err = nil"
+      lines[#lines + 1] = "          if ek == \"canceled\" then return Task.canceled(ev) end"
+      lines[#lines + 1] = "          return Task.rejected(ev)"
+      lines[#lines + 1] = "        else"
+      lines[#lines + 1] = "          self._err = nil"
+      lines[#lines + 1] = "          self._state = " .. join_i
+      lines[#lines + 1] = "        end"
+    elseif e and e.kind == "propagate_err" then
+      lines[#lines + 1] = "        local ek = self._err_kind"
+      lines[#lines + 1] = "        local ev = self._err"
+      lines[#lines + 1] = "        self._propagate = false"
+      lines[#lines + 1] = "        self._err = nil"
+      lines[#lines + 1] = "        if ek == \"canceled\" then return Task.canceled(ev) end"
+      lines[#lines + 1] = "        return Task.rejected(ev)"
     else
       lines[#lines + 1] = "        return Task.resolved(nil)"
     end

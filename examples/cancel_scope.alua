@@ -1,0 +1,37 @@
+-- cancel_scope + ambient Cancellation.current()
+-- 宿主里 Cancellation.scope 压 ambient；async 内 delay 读 Cancellation.current()
+-- 下一轮微任务取消 → do_work 的 Task 变为 canceled
+-- 期望 RESULT: canceled
+
+local Cancellation = require("runtime.cancellation")
+
+async function do_work()
+  local a = await delay(10)
+  local b = await delay(100)
+  return a + b
+end
+
+-- 普通 Lua：创建 scope、安排取消、返回 Task（可能被取消）
+local function start_cancelable_work()
+  return Cancellation.scope(function(cts)
+    Task.defer(function()
+      cts:cancel()
+    end)
+    return do_work()
+  end)
+end
+
+async function run_cancel_scope()
+  local outcome = "ok"
+  try
+    local v = await start_cancelable_work()
+    outcome = v
+  catch e
+    if type(e) == "table" and e.canceled then
+      outcome = "canceled"
+    else
+      outcome = "error"
+    end
+  end
+  return outcome
+end

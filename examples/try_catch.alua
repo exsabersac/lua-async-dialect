@@ -1,0 +1,21 @@
+-- try/catch/finally：await 失败进入 catch，finally 必跑
+-- 期望 RESULT: caught-fin
+
+local finally_mark = ""
+
+local function boom()
+  return Task.rejected("boom")
+end
+
+async function run_try_catch()
+  local result = "ok"
+  try
+    local x = await boom()
+    result = x
+  catch e
+    result = "caught"
+  finally
+    finally_mark = "fin"
+  end
+  return result .. "-" .. finally_mark
+end

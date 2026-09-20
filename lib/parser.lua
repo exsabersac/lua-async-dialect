@@ -1,7 +1,7 @@
 --[[
   递归下降语法分析：token 流 → AST。
   用于 splice 抽出的单个 async function 区域；
-  支持比较 / 逻辑 / 拼接 / 索引 / 方法调用 / 表构造 / if / while / for。
+  支持比较 / 逻辑 / 拼接 / 索引 / 方法调用 / 表构造 / if / while / for / try-catch-finally。
 ]]
 
 local Parser = {}
@@ -229,7 +229,8 @@ end
 
 function Parser:block_end()
   local ct = self:cur().type
-  return ct == "end" or ct == "else" or ct == "elseif" or ct == "until" or ct == "eof"
+  return ct == "end" or ct == "else" or ct == "elseif" or ct == "until"
+      or ct == "catch" or ct == "finally" or ct == "eof"
 end
 
 function Parser:parse_block()
@@ -286,6 +287,35 @@ function Parser:parse_for()
   return { tag = "for", name = name, start = a, stop = b, step = c, body = body }
 end
 
+
+function Parser:parse_try()
+  self:expect("try")
+  local body = self:parse_block()
+  local catch_name, catch_body = nil, nil
+  if self:match("catch") then
+    if self:cur().type == "name" then
+      catch_name = self:advance().value
+    end
+    catch_body = self:parse_block()
+  end
+  local finally_body = nil
+  if self:match("finally") then
+    finally_body = self:parse_block()
+  end
+  if not catch_body and not finally_body then
+    error(string.format("try requires catch and/or finally at %d:%d",
+      self:cur().line or 0, self:cur().col or 0))
+  end
+  self:expect("end")
+  return {
+    tag = "try",
+    body = body,
+    catch_name = catch_name,
+    catch_body = catch_body,
+    finally_body = finally_body,
+  }
+end
+
 function Parser:parse_lvalue_suffix(base)
   -- base is already a name node; parse . / [] for assignment target
   local node = base
@@ -319,6 +349,16 @@ function Parser:parse_stmt()
   end
   if self:cur().type == "for" then
     return self:parse_for()
+  end
+  if self:cur().type == "try" then
+    return self:parse_try()
+  end
+  if self:match("rethrow") then
+    local exp = nil
+    if self:is_expr_start() then
+      exp = self:parse_expr()
+    end
+    return { tag = "rethrow", expr = exp }
   end
   if self:match("return") then
     local exp = nil

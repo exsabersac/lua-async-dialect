@@ -11,6 +11,7 @@ local KEYWORDS = {
   ["local"] = true, ["return"] = true, ["await"] = true,
   ["if"] = true, ["then"] = true, ["else"] = true, ["elseif"] = true,
   ["while"] = true, ["do"] = true, ["for"] = true,
+  ["try"] = true, ["catch"] = true, ["finally"] = true, ["rethrow"] = true,
   ["and"] = true, ["or"] = true, ["not"] = true,
   ["true"] = true, ["false"] = true, ["nil"] = true,
   ["repeat"] = true, ["until"] = true,

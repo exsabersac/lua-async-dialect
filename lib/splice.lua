@@ -97,12 +97,13 @@ end
 
 --- 找下一个「有意义」token 起点，跳过空白/注释/字符串时推进 i
 --- 返回 i, kind 其中 kind 为 "word"|nil；若遇到字符串则跳过
--- Lua 块开启：function / if / do / repeat。
+-- Lua 块开启：function / if / do / try / repeat。
 -- while/for 本身不加深，由其后的 do 加深（while x do ... end 只对应一个 end）。
 local OPEN_KEYWORDS = {
   ["function"] = true,
   ["if"] = true,
   ["do"] = true,
+  ["try"] = true,  -- try/catch/finally ... end
 }
 
 --- 扫描并返回 chunks: { {kind="text", text=...} | {kind="async", text=...} }
