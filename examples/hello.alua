@@ -1,0 +1,6 @@
+-- hello.alua: await delay twice, return a number
+async function hello()
+  local a = await delay(10)
+  local b = await delay(20)
+  return a + b
+end

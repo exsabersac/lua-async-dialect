@@ -1,0 +1,11 @@
+-- chain.alua: one async function awaits another
+async function add_one(x)
+  local y = await delay(5)
+  return x + y
+end
+
+async function main()
+  local v = await add_one(10)
+  local w = await add_one(v)
+  return w
+end
